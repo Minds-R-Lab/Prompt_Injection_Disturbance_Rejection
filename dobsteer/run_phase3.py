@@ -37,15 +37,38 @@ def roc_auc(pos, neg):
             / (p.numel() * n.numel())).item()
 
 
-def fit_shared(model, tok, train_p, fmt, device, k, all_layers):
+def template_span(tok, fmt):
+    """Token counts of the fixed chat-template prefix/suffix, so we can scan
+    only the user-content positions (the scaffold is identical across prompts
+    and otherwise dominates the position-scan / corrupts the direction fit)."""
+    ia = tok(fmt("alpha"), return_tensors="pt").input_ids[0].tolist()
+    ib = tok(fmt("beta gamma delta"), return_tensors="pt").input_ids[0].tolist()
+    pre = 0
+    while pre < min(len(ia), len(ib)) and ia[pre] == ib[pre]:
+        pre += 1
+    suf = 0
+    while suf < min(len(ia), len(ib)) and ia[-1 - suf] == ib[-1 - suf]:
+        suf += 1
+    return pre, suf
+
+
+def content_slice(T, pre, suf):
+    lo, hi = pre, max(pre + 1, T - suf)
+    return lo, hi
+
+
+def fit_shared(model, tok, train_p, fmt, device, k, all_layers, span):
     """One chat-formatted subspace fit reused by gate and canceller.
     Returns V (k,d per layer), coord mean/sd, Mahalanobis mean/std per layer."""
+    pre, suf = span
     capf = lambda p: capture_trace(model, tok, fmt(p), device)
-    def last_upd(p):
-        x = torch.stack(capf(p).states); return (x[1:] - x[:-1])[:, -1, :]  # (L,d)
-    fb = torch.stack([last_upd(p) for p in train_p])                        # (N,L,d)
-    D = torch.cat([torch.stack([last_upd(p + inj) for p in train_p]) - fb
-                   for inj in INJECTIONS])                                  # (M,L,d)
+    def last_content_upd(p):
+        x = torch.stack(capf(p).states); u = x[1:] - x[:-1]   # (L,T,d)
+        lo, hi = content_slice(u.shape[1], pre, suf)
+        return u[:, hi - 1, :]                                # last CONTENT token (L,d)
+    fb = torch.stack([last_content_upd(p) for p in train_p])  # (N,L,d)
+    D = torch.cat([torch.stack([last_content_upd(p + inj) for p in train_p]) - fb
+                   for inj in INJECTIONS])                     # (M,L,d)
     V = {}
     for l in all_layers:
         _, _, Vh = torch.linalg.svd(D[:, l, :], full_matrices=False)
@@ -53,8 +76,9 @@ def fit_shared(model, tok, train_p, fmt, device, k, all_layers):
     coords = {l: [] for l in all_layers}
     for p in train_p:
         x = torch.stack(capf(p).states); u = x[1:] - x[:-1]
+        lo, hi = content_slice(u.shape[1], pre, suf)
         for l in all_layers:
-            coords[l].append(u[l] @ V[l].T)
+            coords[l].append(u[l, lo:hi] @ V[l].T)            # content positions only
     mu, sd, mbar, msd = {}, {}, {}, {}
     for l in all_layers:
         c = torch.cat(coords[l])
@@ -64,14 +88,16 @@ def fit_shared(model, tok, train_p, fmt, device, k, all_layers):
     return V, mu, sd, mbar, msd
 
 
-def gate_score(model, tok, text, device, V, mu, sd, mbar, msd, det_layers):
-    """Prompt score: max over positions of mid-layer-mean calibrated subspace
-    Mahalanobis z (benign ~ 0)."""
+def gate_score(model, tok, text, device, V, mu, sd, mbar, msd, det_layers, span):
+    """Prompt score: max over CONTENT positions of mid-layer-mean calibrated
+    subspace Mahalanobis z (benign ~ 0). Scaffold positions are excluded."""
+    pre, suf = span
     x = torch.stack(capture_trace(model, tok, text, device).states)
     u = x[1:] - x[:-1]
+    lo, hi = content_slice(u.shape[1], pre, suf)
     zs = []
     for l in det_layers:
-        c = u[l] @ V[l].T
+        c = u[l, lo:hi] @ V[l].T
         m = ((c - mu[l]) / sd[l]).norm(dim=-1)
         zs.append((m - mbar[l]) / msd[l])
     return torch.stack(zs).mean(0).max().item()
@@ -108,9 +134,11 @@ def main():
     print(f"Model={args.model} k={args.k} alpha={args.alpha} tau={args.tau} "
           f"det=mid({det_layers[0]}-{det_layers[-1]}) cancel=all")
 
-    print("  fitting shared subspace (chat-formatted)...")
-    V, mu, sd, mbar, msd = fit_shared(model, tok, train_p, fmt, args.device, args.k, all_layers)
-    gs = lambda text: gate_score(model, tok, text, args.device, V, mu, sd, mbar, msd, det_layers)
+    span = template_span(tok, fmt)
+    print(f"  chat-template span: prefix={span[0]} suffix={span[1]} tokens (excluded from scan)")
+    print("  fitting shared subspace (chat-formatted, content positions)...")
+    V, mu, sd, mbar, msd = fit_shared(model, tok, train_p, fmt, args.device, args.k, all_layers, span)
+    gs = lambda text: gate_score(model, tok, text, args.device, V, mu, sd, mbar, msd, det_layers, span)
 
     # ---- gate scores: train(calibration) benign+injected, test benign+injected
     btr = [gs(fmt(p)) for p in train_p]
