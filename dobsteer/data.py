@@ -47,7 +47,12 @@ def load_benign(n=1000, seed=0,
                     prompts.append(txt)
     except Exception:
         pass
+    n_hf = len(prompts)
     if len(prompts) < n:
+        if n_hf == 0:
+            print("  [data] WARNING: HF `datasets` unavailable or empty -> "
+                  "falling back to built-in benign set. `pip install datasets` "
+                  "to scale the benign corpus.")
         prompts = prompts + list(_BUILTIN_BENIGN)
     prompts = list(dict.fromkeys(p.strip() for p in prompts if p and p.strip()))
     rng = random.Random(seed)

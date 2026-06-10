@@ -23,7 +23,7 @@ from .run_phase3 import template_span, content_slice, roc_auc
 
 
 def last_content(u, span):              # u: (L,T,d) -> (L,d)
-    lo, hi = content_slice(u.shape[1], (span[0], span[1]))
+    lo, hi = content_slice(u.shape[1], span[0], span[1])
     return u[:, hi - 1, :].float()
 
 
@@ -41,7 +41,7 @@ def fit_detector(bxs, ixs, layers, k, span):
     for l in layers:
         cs = []
         for u in bxs:
-            lo, hi = content_slice(u.shape[1], (span[0], span[1]))
+            lo, hi = content_slice(u.shape[1], span[0], span[1])
             cs.append(u[l, lo:hi].float() @ V[l].T)
         c = torch.cat(cs)
         mu[l] = c.mean(0); sd[l] = c.std(0).clamp_min(1e-6)
@@ -51,7 +51,7 @@ def fit_detector(bxs, ixs, layers, k, span):
 
 
 def score(u, V, mu, sd, mbar, msd, det_layers, span):
-    lo, hi = content_slice(u.shape[1], (span[0], span[1]))
+    lo, hi = content_slice(u.shape[1], span[0], span[1])
     zs = []
     for l in det_layers:
         c = u[l, lo:hi].float() @ V[l].T
