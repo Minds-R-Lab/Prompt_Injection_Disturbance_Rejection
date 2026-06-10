@@ -157,15 +157,10 @@ def main():
     if args.det_thr is not None:
         thr = args.det_thr
     else:
-        cand = sorted(set([round(x, 3) for x in btr + itr]))
-        thr = None
-        for t in cand:
-            fpr_c = sum(x > t for x in btr) / len(btr)
-            if fpr_c <= args.target_fpr:
-                thr = t; break
-        if thr is None:
-            thr = (max(btr) + min(itr)) / 2
-        thr = max(thr, (max(btr) + min(itr)) / 2 if min(itr) > max(btr) else thr)
+        # threshold = train-benign quantile at (1 - target_fpr); target_fpr=0 -> max.
+        bt = torch.tensor(btr)
+        thr = bt.max().item() if args.target_fpr <= 0 else \
+              torch.quantile(bt, 1.0 - args.target_fpr).item()
     print(f"  gate threshold = {thr:.2f}  (target FPR {args.target_fpr})")
 
     def gated_generate(text):
