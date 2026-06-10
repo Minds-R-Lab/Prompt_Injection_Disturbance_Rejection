@@ -48,3 +48,13 @@ H2** and greenlights the closed-loop phase.
   (closed-loop cancellation with internal model + deadband)
 - `prompts.py` — benign prompt set + injection strings
 - `run_phase0.py`, `run_phase1.py` — experiment entry points
+
+## Run Phase 2 (closed-loop defense)
+
+```
+python -m dobsteer.run_phase2 --model Qwen/Qwen2.5-7B-Instruct --device cuda
+```
+
+Deadband cancellation during generation; reports attack success rate
+with/without defense, benign next-token KL, intervention energy.
+See `RESULTS.md` for the full experimental log.
