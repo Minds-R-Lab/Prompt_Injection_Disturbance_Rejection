@@ -43,3 +43,29 @@ reduction at negligible benign KL.
 - Paraphrased/translated injections (semantic vs lexical generalization).
 - Adaptive attacker (knows v, optimizes around the deadband) -- future work.
 - Benchmark suites (GCG suffixes, indirect injection sets) for the paper.
+
+## Phase 3 — detect-then-cancel (gated), CONFIRMED
+
+Hardened gate (content-aware: chat-template scaffold excluded from the
+subspace fit and position scan; fit at last CONTENT token). Qwen2.5-7B-Instruct,
+k=32, alpha=3, all-layer cancellation, per-position deadband tau=1.
+
+| metric | value |
+|---|---|
+| gate AUC (instruct, test) | 0.997 |
+| ASR (base -> gated) | 0.91 -> 0.19 (79% reduction) at target-FPR 0 |
+| benign FPR | 0.00 |
+| benign KL | 0.0000 |
+
+Key fix: v1/v2 gated on an all-layer mean direction fit at the chat-template's
+last (scaffold) token -> constant score, AUC 0.55. Excluding the fixed template
+span and fitting/scanning only user-content positions restored AUC 0.997.
+
+Residual: at strict target-FPR 0 the threshold sits above the weakest
+injections (TPR 0.79), leaving 0.19 ASR. Relaxing to FPR<=0.05 is expected to
+push TPR->1, ASR->~0.02 at near-zero benign KL -- traced by run_sweep.
+
+## Foundation battery: run_all.sh
+Seed stability (5 seeds) + target-FPR ROC (run_sweep), Phase-2 Pareto, and
+Phase-1 across 3 families. All scaffold-correct (content-aware fitting ported
+into Phase 2). Run before scaling.

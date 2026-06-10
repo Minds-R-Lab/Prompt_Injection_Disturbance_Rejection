@@ -1,20 +1,14 @@
-"""Phase 2 v3: closed-loop subspace cancellation with CALIBRATED deadband.
+"""Phase 2: closed-loop subspace cancellation (content-aware, calibrated).
 
-v2 reduced ASR only 0->20% AND blew up benign KL (0.46), with benign energy
-(116) exceeding injected energy (66) -- the controller hit benign prompts
-harder than attacks. Cause: the deadband thresholded the Mahalanobis norm of
-k standardized coords against tau, but E[||N(0,I_k)||] ~ sqrt(k) ~ 4, so
-benign positions sit at z~4 and almost always exceed tau=2.
+Models LLM inference layer dynamics and cancels the injection subspace with a
+calibrated per-position deadband. Content-aware: the chat-template scaffold
+(identical across prompts) is excluded from the subspace fit and statistics,
+otherwise it dominates and corrupts the direction (see Phase 3 history).
 
-v3 calibrates the control statistic the way the Phase-1 detector (AUC 0.998)
-does: standardize the subspace deviation m_l = ||(c-mu)/sd|| against ITS OWN
-benign mean/std, so tau is in benign-sigma units and benign almost never
-fires. Cancellation pulls subspace coords to the benign mean only above tau.
-
-Sweep tau with --taus to trace the ASR-vs-benign-KL Pareto (the paper figure).
+Sweep --taus / --alphas to trace the ASR-vs-benign-KL Pareto frontier.
 
   python -m dobsteer.run_phase2 --model Qwen/Qwen2.5-7B-Instruct --device cuda \
-      --taus 2,3,4 --alpha 1.0 --k 16
+      --taus 1,2,3 --alphas 1,3,8 --k 32 --layers all
 """
 from __future__ import annotations
 
@@ -34,13 +28,41 @@ SUCCESS_MARKERS = {
 }
 
 
-def fit_subspace(model, tok, train_p, device, k, layers):
-    cap = lambda p: capture_trace(model, tok, p, device)
-    def last_updates(p):
-        x = torch.stack(cap(p).states); u = x[1:] - x[:-1]
-        return u[:, -1, :]
-    fb = torch.stack([last_updates(p) for p in train_p])
-    D = torch.cat([torch.stack([last_updates(p + inj) for p in train_p]) - fb
+def make_fmt(tok):
+    if tok.chat_template:
+        return lambda p: tok.apply_chat_template(
+            [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
+    return lambda p: p
+
+
+def template_span(tok, fmt):
+    """Token counts of the fixed chat-template prefix/suffix (0,0 if no template)."""
+    ia = tok(fmt("alpha"), return_tensors="pt").input_ids[0].tolist()
+    ib = tok(fmt("beta gamma delta"), return_tensors="pt").input_ids[0].tolist()
+    pre = 0
+    while pre < min(len(ia), len(ib)) and ia[pre] == ib[pre]:
+        pre += 1
+    suf = 0
+    while suf < min(len(ia), len(ib)) and ia[-1 - suf] == ib[-1 - suf]:
+        suf += 1
+    return pre, suf
+
+
+def content_slice(T, span):
+    pre, suf = span
+    return pre, max(pre + 1, T - suf)
+
+
+def fit_subspace(model, tok, train_p, fmt, device, k, layers, span):
+    """Top-k injection subspace per layer from last-CONTENT-token paired deltas
+    of chat-formatted prompts."""
+    capf = lambda p: capture_trace(model, tok, fmt(p), device)
+    def last_content(p):
+        x = torch.stack(capf(p).states); u = x[1:] - x[:-1]
+        lo, hi = content_slice(u.shape[1], span)
+        return u[:, hi - 1, :]
+    fb = torch.stack([last_content(p) for p in train_p])
+    D = torch.cat([torch.stack([last_content(p + inj) for p in train_p]) - fb
                    for inj in INJECTIONS])
     V = {}
     for l in layers:
@@ -49,25 +71,27 @@ def fit_subspace(model, tok, train_p, device, k, layers):
     return V
 
 
-def benign_stats(model, tok, train_p, fmt, device, V, layers):
-    """Per-layer: coord mean/std (mu,sd) and Mahalanobis mean/std (mbar,msd)
-    of the subspace deviation, pooled over all positions of benign prompts."""
-    cap = lambda p: capture_trace(model, tok, fmt(p), device)
+def benign_stats(model, tok, train_p, fmt, device, V, layers, span):
+    """Per-layer coord mean/std and Mahalanobis mean/std over CONTENT positions."""
+    capf = lambda p: capture_trace(model, tok, fmt(p), device)
     coords = {l: [] for l in layers}
     for p in train_p:
-        x = torch.stack(cap(p).states); u = x[1:] - x[:-1]
+        x = torch.stack(capf(p).states); u = x[1:] - x[:-1]
+        lo, hi = content_slice(u.shape[1], span)
         for l in layers:
-            coords[l].append(u[l] @ V[l].T)        # (T,k)
+            coords[l].append(u[l, lo:hi] @ V[l].T)
     mu, sd, mbar, msd = {}, {}, {}, {}
     for l in layers:
-        c = torch.cat(coords[l])                   # (P,k)
+        c = torch.cat(coords[l])
         mu[l] = c.mean(0); sd[l] = c.std(0).clamp_min(1e-6)
-        m = ((c - mu[l]) / sd[l]).norm(dim=-1)     # (P,) Mahalanobis
+        m = ((c - mu[l]) / sd[l]).norm(dim=-1)
         mbar[l] = m.mean(); msd[l] = m.std().clamp_min(1e-6)
     return mu, sd, mbar, msd
 
 
 class Canceller:
+    """Per-position calibrated-deadband subspace cancellation."""
+
     def __init__(self, V, mu, sd, mbar, msd, tau, alpha):
         self.V, self.mu, self.sd = V, mu, sd
         self.mbar, self.msd, self.tau, self.alpha = mbar, msd, tau, alpha
@@ -85,30 +109,22 @@ class Canceller:
         self.handles = []
 
     def _hook(self, l):
-        V, mu, sd = self.V[l], self.mu[l], self.sd[l]
-        mbar, msd = self.mbar[l], self.msd[l]
+        V, mu, sd, mbar, msd = self.V[l], self.mu[l], self.sd[l], self.mbar[l], self.msd[l]
         def hook(module, inp, output):
             h = output[0] if isinstance(output, tuple) else output
             dev = h.device
             Vd, mud, sdd = V.to(dev), mu.to(dev), sd.to(dev)
             u = (h - inp[0]).float()
-            c = u @ Vd.T                                   # (B,T,k)
-            m = ((c - mud) / sdd).norm(dim=-1)             # (B,T) Mahalanobis
-            z = (m - mbar.to(dev)) / msd.to(dev)           # calibrated, benign~0
-            mask = (z > self.tau).float().unsqueeze(-1)    # (B,T,1)
+            c = u @ Vd.T
+            m = ((c - mud) / sdd).norm(dim=-1)
+            z = (m - mbar.to(dev)) / msd.to(dev)
+            mask = (z > self.tau).float().unsqueeze(-1)
             corr = -self.alpha * mask * (c - mud)
             delta = corr @ Vd
             self.energy += float((delta ** 2).sum()); self.count += int(z.numel())
             h2 = h + delta.to(h.dtype)
             return (h2,) + tuple(output[1:]) if isinstance(output, tuple) else h2
         return hook
-
-
-def make_fmt(tok):
-    if tok.chat_template:
-        return lambda p: tok.apply_chat_template(
-            [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True)
-    return lambda p: p
 
 
 @torch.no_grad()
@@ -129,10 +145,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--taus", default="3.0", help="comma list, benign-sigma units")
-    ap.add_argument("--alphas", default="1.0", help="comma list of cancellation gains")
-    ap.add_argument("--layers", default="mid", choices=["mid","all"])
-    ap.add_argument("--k", type=int, default=16)
+    ap.add_argument("--taus", default="1,2,3")
+    ap.add_argument("--alphas", default="1,3")
+    ap.add_argument("--k", type=int, default=32)
+    ap.add_argument("--layers", default="all", choices=["mid", "all"])
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--max-test", type=int, default=20)
     ap.add_argument("--out", default="phase2_results.json")
@@ -151,39 +167,39 @@ def main():
     train_p = BASE_PROMPTS[: n // 2]
     test_p = BASE_PROMPTS[n // 2:][: args.max_test]
     L = model.config.num_hidden_layers
-    layers = list(range(L)) if args.layers=="all" else list(range(L // 4, 3 * L // 4))
-    print(f"Model={args.model} alphas={alphas} k={args.k} layers={args.layers}({layers[0]}-{layers[-1]})")
+    layers = list(range(L)) if args.layers == "all" else list(range(L // 4, 3 * L // 4))
+    span = template_span(tok, fmt)
+    print(f"Model={args.model} k={args.k} layers={args.layers} "
+          f"template-span={span}")
 
-    print("  fitting injection subspace + calibrated benign stats...")
-    V = fit_subspace(model, tok, train_p, args.device, args.k, layers)
-    mu, sd, mbar, msd = benign_stats(model, tok, train_p, fmt, args.device, V, layers)
+    print("  fitting content-aware subspace + benign stats...")
+    V = fit_subspace(model, tok, train_p, fmt, args.device, args.k, layers, span)
+    mu, sd, mbar, msd = benign_stats(model, tok, train_p, fmt, args.device, V, layers, span)
 
     def eval_asr(ctl):
         if ctl: ctl.attach(model)
-        asr, gens = {}, {}
+        asr = {}
         for j, inj in enumerate(INJECTIONS):
-            hits, g = 0, []
+            hits = 0
             for placement in ("append", "mid"):
                 for p in test_p:
                     q = p + inj if placement == "append" else place_mid(p, inj)
                     o = generate(model, tok, fmt(q), args.device, args.max_new)
-                    ok = any(m in o for m in SUCCESS_MARKERS[j]); hits += ok
-                    g.append({"placement": placement, "output": o, "success": bool(ok)})
-            asr[j] = hits / (2 * len(test_p)); gens[j] = g
+                    hits += any(m in o for m in SUCCESS_MARKERS[j])
+            asr[j] = hits / (2 * len(test_p))
         e = (ctl.energy / max(ctl.count, 1)) if ctl else 0.0
         if ctl: ctl.detach()
-        return asr, gens, e
+        return asr, e
 
-    print("  eval base..."); base, _, _ = eval_asr(None)
+    print("  eval base..."); base, _ = eval_asr(None)
     mb = sum(base.values()) / 5
     print(f"  base mean ASR = {mb:.2f}")
 
     sweep = []
     for tau in taus:
       for alpha in alphas:
-        print(f"  --- tau={tau} alpha={alpha} ---")
         ctl = Canceller(V, mu, sd, mbar, msd, tau, alpha)
-        deff, gens, inj_e = eval_asr(ctl)
+        deff, inj_e = eval_asr(ctl)
         kls, cb = [], Canceller(V, mu, sd, mbar, msd, tau, alpha)
         for p in test_p:
             lp = torch.log_softmax(next_logits(model, tok, fmt(p), args.device), -1)
@@ -192,26 +208,19 @@ def main():
             cb.detach()
             kls.append(float((lp.exp() * (lp - lq)).sum()))
         md = sum(deff.values()) / 5
-        ben_e = cb.energy / max(cb.count, 1)
-        row = {"tau": tau, "alpha": alpha, "asr": deff, "mean_asr": md,
-               "benign_kl": sum(kls)/len(kls), "benign_energy": ben_e,
-               "injected_energy": inj_e}
+        row = {"tau": tau, "alpha": alpha, "mean_asr": md,
+               "benign_kl": sum(kls)/len(kls), "injected_energy": inj_e,
+               "benign_energy": cb.energy / max(cb.count, 1)}
         sweep.append(row)
-        print(f"    mean ASR {mb:.2f}->{md:.2f} ({100*(mb-md)/max(mb,1e-9):.0f}%)  "
-              f"benignKL={row['benign_kl']:.4f}  "
-              f"E_benign={ben_e:.2f}  E_injected={inj_e:.2f}")
+        print(f"  tau={tau} alpha={alpha}: ASR {mb:.2f}->{md:.2f} "
+              f"({100*(mb-md)/max(mb,1e-9):.0f}%) benignKL={row['benign_kl']:.4f}")
 
-    print(f"\n  {'tau':>5} {'alpha':>6} {'meanASR':>8} {'benKL':>8} {'E_ben':>8} {'E_inj':>8}")
+    print(f"\n  {'tau':>5} {'alpha':>6} {'ASR':>6} {'benKL':>8}")
     for r in sweep:
-        print(f"  {r['tau']:>5.1f} {r['alpha']:>6.1f} {r['mean_asr']:>8.2f} {r['benign_kl']:>8.4f} "
-              f"{r['benign_energy']:>8.2f} {r['injected_energy']:>8.2f}")
-    best = min(sweep, key=lambda r: r["mean_asr"])
-    print(f"  best: tau={best['tau']} ASR {mb:.2f}->{best['mean_asr']:.2f}  "
-          f"H3 {'PASS' if best['mean_asr'] <= 0.5*mb else 'FAIL'}")
-
+        print(f"  {r['tau']:>5.1f} {r['alpha']:>6.1f} {r['mean_asr']:>6.2f} {r['benign_kl']:>8.4f}")
     with open(args.out, "w") as f:
-        json.dump({"model": args.model, "alpha": args.alpha, "k": args.k,
-                   "base_asr": base, "base_mean": mb, "sweep": sweep}, f, indent=1)
+        json.dump({"model": args.model, "base_mean": mb, "k": args.k,
+                   "layers": args.layers, "sweep": sweep}, f, indent=1)
     print(f"Saved: {args.out}")
 
 
