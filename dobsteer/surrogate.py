@@ -36,7 +36,6 @@ def jacobian_at(model_hf, tokenizer, prompt: str, layer: int, device="cuda",
 
     Note: O(d) backward passes — use on small models / selected layers only.
     """
-    import functools
     ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     out = model_hf(ids, output_hidden_states=True)
     x_l = out.hidden_states[layer][0, pos].detach()
