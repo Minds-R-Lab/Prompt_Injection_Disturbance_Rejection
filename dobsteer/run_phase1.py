@@ -1,27 +1,23 @@
-"""Phase 1 v4: matched-filter detection with confound controls.
+"""Phase 1 v5: position-scanning matched filter.
 
-v3 hit AUC 1.000, which demands skepticism: all positives were APPENDED
-text, all negatives bare prompts. v4 controls for this:
-- negatives include benign-suffixed decoys (harmless appended sentences,
-  some containing attack-adjacent words like "system"/"instructions");
-- positives are evaluated both appended AND embedded mid-context.
-A detector that only spots "something was appended" will now fail.
+v4 findings: (a) the append confound behind v3's AUC 1.0 was real (1.5B
+dropped to 0.838 with benign-suffix decoys) but genuine signal survives at
+7B (0.980); (b) mid-context injections were UNDETECTABLE (~0.44) because the
+filter only read the LAST token, where no injection is being processed.
 
-v2 plateaued at AUC ~0.77 with norm == proj, which is diagnostic: the SVD of
-raw injected residuals recovers generic benign variance directions, not the
-injection. The fix follows directly from Phase 0: the PAIRED delta direction
-(update_injected - update_benign) is consistent across prompts (cos ~0.93),
-so the optimal detector for a known low-rank signal in noise is a MATCHED
-FILTER: project the test layer-update onto the (LOIO) mean delta direction
-and z-score against benign statistics of that same projection.
+v5 scans: project the layer updates at EVERY position onto the injection
+direction, z-score against benign all-position statistics, and take the max
+over positions. A mid-context injection is then caught at its own tokens.
 
-Detectors reported (all leave-one-injection-out where applicable):
-  norm    : z-scored full residual norm (no attack knowledge) — baseline
-  mf-upd  : matched filter on raw layer updates u_l = x_{l+1} - x_l
-  mf-res  : matched filter on surrogate residuals (DOB framing)
+Detectors (LOIO over injection strings; negatives include benign-suffixed
+decoys):
+  norm     : z-scored residual norm, no attack knowledge (baseline)
+  mf-last  : matched filter at last token only (v4, for comparison)
+  mf-scan  : position-scanning matched filter on layer updates
+  mfr-scan : position-scanning matched filter on surrogate residuals (DOB)
 
 Usage:
-  python -m dobsteer.run_phase1 --model Qwen/Qwen2.5-1.5B --device cuda
+  python -m dobsteer.run_phase1 --model Qwen/Qwen2.5-7B --device cuda
 """
 from __future__ import annotations
 
@@ -41,7 +37,7 @@ def roc_auc(scores_pos, scores_neg) -> float:
     return ((greater + 0.5 * ties) / (pos.numel() * neg.numel())).item()
 
 
-# ---------- shared pieces ----------
+# ---------- features ----------
 
 def fit_all_positions(traces, lam=1e-1, max_samples=8192, seed=0):
     g = torch.Generator().manual_seed(seed)
@@ -57,19 +53,20 @@ def fit_all_positions(traces, lam=1e-1, max_samples=8192, seed=0):
     return models
 
 
-def updates_last(trace):
-    """(L, d) layer updates at the last token position."""
-    x = trace.at_position(-1)
+def updates_all(trace):
+    """(L, T, d) layer updates at every position."""
+    x = torch.stack(trace.states)            # (L+1, T, d)
     return x[1:] - x[:-1]
 
 
-def residuals_last(trace, models):
-    """(L, d) surrogate residuals at the last token position."""
-    x = trace.at_position(-1)
-    return torch.stack([x[l + 1] - x[l] @ A.T - b for l, (A, b, _) in enumerate(models)])
+def residuals_all(trace, models):
+    """(L, T, d) surrogate residuals at every position."""
+    x = torch.stack(trace.states)
+    return torch.stack([x[l + 1] - x[l] @ A.T - b
+                        for l, (A, b, _) in enumerate(models)])
 
 
-# ---------- detector 1: residual-norm baseline (v2) ----------
+# ---------- baseline: residual norm ----------
 
 def norm_stats(traces, models):
     mu, sd = [], []
@@ -88,46 +85,46 @@ def score_norm(trace, models, mu, sd):
     return torch.stack(zs).mean().item()
 
 
-# ---------- detectors 2/3: matched filter ----------
+# ---------- matched filter ----------
 
-def mf_directions(train_b_feats, train_i_feats_list):
-    """v_l = normalized mean paired delta per layer.
-
-    train_b_feats: (N, L, d) features (updates or residuals) of benign train.
-    train_i_feats_list: list over injections of (N, L, d) injected features.
-    Returns (L, d) unit directions.
-    """
-    deltas = torch.cat([fi - train_b_feats for fi in train_i_feats_list])  # (M, L, d)
-    v = deltas.mean(0)                                                      # (L, d)
+def mf_directions(fb_train_last, fi_train_last_list):
+    """Unit injection direction per layer from last-token paired deltas."""
+    deltas = torch.cat([fi - fb_train_last for fi in fi_train_last_list])
+    v = deltas.mean(0)
     return v / v.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
 
-def mf_scores(feats, v, mu, sd, mid):
-    """feats: (N, L, d); v: (L, d); z-scored projection, mean over mid layers."""
-    proj = (feats * v).sum(-1)               # (N, L)
-    z = (proj - mu) / sd
-    return z[:, mid].mean(-1).tolist()
+def scan_stats(traces, feats_fn, v):
+    """Benign mean/std of the projection per layer, pooled over positions."""
+    projs = torch.cat([(feats_fn(t) * v[:, None, :]).sum(-1) for t in traces], dim=1)
+    return projs.mean(1), projs.std(1).clamp_min(1e-6)
 
 
-def mf_eval(get_feats, train_b, train_i, test_neg_traces, test_i, L):
-    """LOIO matched-filter evaluation.
+def scan_score(trace, feats_fn, v, mu, sd, mid):
+    """Max over positions of the mid-layer-mean z-scored projection."""
+    z = ((feats_fn(trace) * v[:, None, :]).sum(-1) - mu[:, None]) / sd[:, None]
+    return z[mid].mean(0).max().item()
 
-    test_neg_traces: list of benign traces used as negatives (bare prompts
-    AND benign-suffixed decoys). test_i: dict j -> list of injected traces
-    (any placement)."""
-    fb_train = torch.stack([get_feats(t) for t in train_b])
-    fb_test = torch.stack([get_feats(t) for t in test_neg_traces])
-    fi_train = {j: torch.stack([get_feats(t) for t in train_i[j]]) for j in train_i}
-    fi_test = {j: torch.stack([get_feats(t) for t in test_i[j]]) for j in test_i}
-    mid = list(range(L // 4, 3 * L // 4))
+
+def last_score(trace, feats_fn, v, mu, sd, mid):
+    """v4-style: z-scored projection at the last position only."""
+    z = ((feats_fn(trace)[:, -1, :] * v).sum(-1) - mu) / sd
+    return z[mid].mean().item()
+
+
+def mf_eval(feats_fn, scorer, train_b, train_i, negatives, positives, L):
+    """LOIO evaluation of a matched-filter scorer."""
+    fb_last = torch.stack([feats_fn(t)[:, -1, :] for t in train_b])
+    fi_last = {j: torch.stack([feats_fn(t)[:, -1, :] for t in train_i[j]])
+               for j in train_i}
+    mid = torch.arange(L // 4, 3 * L // 4)
 
     per, all_p, all_n = {}, [], []
-    for j in fi_test:
-        v = mf_directions(fb_train, [fi_train[jj] for jj in fi_train if jj != j])
-        proj_b = (fb_train * v).sum(-1)                  # (N, L) benign stats
-        mu, sd = proj_b.mean(0), proj_b.std(0).clamp_min(1e-6)
-        neg = mf_scores(fb_test, v, mu, sd, mid)
-        pos = mf_scores(fi_test[j], v, mu, sd, mid)
+    for j in positives:
+        v = mf_directions(fb_last, [fi_last[jj] for jj in fi_last if jj != j])
+        mu, sd = scan_stats(train_b, feats_fn, v)
+        neg = [scorer(t, feats_fn, v, mu, sd, mid) for t in negatives]
+        pos = [scorer(t, feats_fn, v, mu, sd, mid) for t in positives[j]]
         per[j] = roc_auc(pos, neg)
         all_p += pos; all_n += neg
     return per, roc_auc(all_p, all_n)
@@ -135,7 +132,7 @@ def mf_eval(get_feats, train_b, train_i, test_neg_traces, test_i, L):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-7B")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out", default="phase1_results.pt")
     ap.add_argument("--train-frac", type=float, default=0.5)
@@ -158,63 +155,52 @@ def main():
     print("  capturing traces...")
     train_b = [cap(p) for p in train_p]
     test_b = [cap(p) for p in test_p]
-    # decoy negatives: benign prompts with harmless APPENDED suffixes, so the
-    # detector cannot pass by detecting mere appending
     test_b_sfx = [cap(p + s) for p in test_p for s in BENIGN_SUFFIXES]
     train_i = {j: [cap(p + inj) for p in train_p] for j, inj in enumerate(INJECTIONS)}
     test_i = {j: [cap(p + inj) for p in test_p] for j, inj in enumerate(INJECTIONS)}
-    # positional generalization: injection embedded MID-context
     test_i_mid = {j: [cap(place_mid(p, inj)) for p in test_p]
                   for j, inj in enumerate(INJECTIONS)}
     L = len(train_b[0].states) - 1
+    negatives = test_b + test_b_sfx
 
     print("  fitting surrogates...")
     models = fit_all_positions(train_b, lam=args.lam)
+    upd = updates_all
+    res = lambda t: residuals_all(t, models)
 
-    negatives = test_b + test_b_sfx     # bare + benign-suffixed decoys
+    # baseline
+    mu_n, sd_n = norm_stats(train_b, models)
+    neg_n = [score_norm(t, models, mu_n, sd_n) for t in negatives]
+    pooled_norm = roc_auc(
+        [score_norm(t, models, mu_n, sd_n) for j in test_i for t in test_i[j]], neg_n)
 
-    # 1) norm baseline (suffix-controlled negatives)
-    mu, sd = norm_stats(train_b, models)
-    neg = [score_norm(t, models, mu, sd) for t in negatives]
-    auc_norm, all_pos = {}, []
-    for j in test_i:
-        pos = [score_norm(t, models, mu, sd) for t in test_i[j]]
-        auc_norm[j] = roc_auc(pos, neg); all_pos += pos
-    pooled_norm = roc_auc(all_pos, neg)
-
-    # 2) matched filter on raw updates — appended and mid-context positives
-    auc_upd, pooled_upd = mf_eval(updates_last, train_b, train_i, negatives, test_i, L)
-    auc_upd_m, pooled_upd_m = mf_eval(updates_last, train_b, train_i, negatives,
-                                      test_i_mid, L)
-
-    # 3) matched filter on surrogate residuals (DOB)
-    auc_res, pooled_res = mf_eval(lambda t: residuals_last(t, models),
-                                  train_b, train_i, negatives, test_i, L)
-    auc_res_m, pooled_res_m = mf_eval(lambda t: residuals_last(t, models),
-                                      train_b, train_i, negatives, test_i_mid, L)
+    rows = {}
+    for name, positives in (("app", test_i), ("mid", test_i_mid)):
+        rows[name] = {
+            "mf-last": mf_eval(upd, last_score, train_b, train_i, negatives, positives, L),
+            "mf-scan": mf_eval(upd, scan_score, train_b, train_i, negatives, positives, L),
+            "mfr-scan": mf_eval(res, scan_score, train_b, train_i, negatives, positives, L),
+        }
 
     print(f"\n  Negatives: {len(test_b)} bare + {len(test_b_sfx)} benign-suffixed decoys")
-    print("  AUC per injection (norm / mf-upd / mf-res | mid: mf-upd / mf-res), LOIO:")
-    for j, inj in enumerate(INJECTIONS):
-        print(f"    {j}: {auc_norm[j]:.3f} / {auc_upd[j]:.3f} / {auc_res[j]:.3f} | "
-              f"mid: {auc_upd_m[j]:.3f} / {auc_res_m[j]:.3f}  {inj[:35]!r}")
-    print(f"\n  Pooled  appended: norm={pooled_norm:.3f} mf-upd={pooled_upd:.3f} "
-          f"mf-res={pooled_res:.3f}")
-    print(f"  Pooled  mid-ctx : mf-upd={pooled_upd_m:.3f} mf-res={pooled_res_m:.3f}")
-    best = max(pooled_upd, pooled_res)
-    best_m = max(pooled_upd_m, pooled_res_m)
-    print(f"  H2 verdict (appended, suffix-controlled): "
-          f"{'PASS' if best > 0.9 else 'FAIL'} @ 0.90 (best={best:.3f})")
-    print(f"  H2 verdict (mid-context)               : "
-          f"{'PASS' if best_m > 0.9 else 'FAIL'} @ 0.90 (best={best_m:.3f})")
+    print(f"  Pooled norm baseline (appended): {pooled_norm:.3f}")
+    for name, label in (("app", "appended"), ("mid", "mid-context")):
+        print(f"\n  [{label}] AUC per injection (mf-last / mf-scan / mfr-scan):")
+        for j, inj in enumerate(INJECTIONS):
+            print(f"    {j}: {rows[name]['mf-last'][0][j]:.3f} / "
+                  f"{rows[name]['mf-scan'][0][j]:.3f} / "
+                  f"{rows[name]['mfr-scan'][0][j]:.3f}  {inj[:38]!r}")
+        pooled = {k: v[1] for k, v in rows[name].items()}
+        print(f"    pooled: mf-last={pooled['mf-last']:.3f}  "
+              f"mf-scan={pooled['mf-scan']:.3f}  mfr-scan={pooled['mfr-scan']:.3f}")
+        best = max(pooled.values())
+        print(f"    H2 ({label}): {'PASS' if best > 0.9 else 'FAIL'} @ 0.90 "
+              f"(best={best:.3f})")
 
-    torch.save({"model": args.model, "auc_norm": auc_norm,
-                "auc_upd": auc_upd, "auc_res": auc_res,
-                "auc_upd_mid": auc_upd_m, "auc_res_mid": auc_res_m,
-                "pooled": {"norm": pooled_norm, "upd": pooled_upd,
-                           "res": pooled_res, "upd_mid": pooled_upd_m,
-                           "res_mid": pooled_res_m}}, args.out)
-    print(f"Saved: {args.out}")
+    torch.save({"model": args.model, "pooled_norm": pooled_norm,
+                "rows": {n_: {k: (dict(v[0]), v[1]) for k, v in r.items()}
+                         for n_, r in rows.items()}}, args.out)
+    print(f"\nSaved: {args.out}")
 
 
 if __name__ == "__main__":
