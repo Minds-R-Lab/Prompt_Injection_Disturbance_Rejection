@@ -152,7 +152,7 @@ def main():
     test_p = BASE_PROMPTS[n // 2:][: args.max_test]
     L = model.config.num_hidden_layers
     layers = list(range(L)) if args.layers=="all" else list(range(L // 4, 3 * L // 4))
-    print(f"Model={args.model} alpha={args.alpha} k={args.k} layers={layers[0]}-{layers[-1]}")
+    print(f"Model={args.model} alphas={alphas} k={args.k} layers={args.layers}({layers[0]}-{layers[-1]})")
 
     print("  fitting injection subspace + calibrated benign stats...")
     V = fit_subspace(model, tok, train_p, args.device, args.k, layers)
