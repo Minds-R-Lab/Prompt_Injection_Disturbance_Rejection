@@ -69,6 +69,10 @@ def main():
     ap.add_argument("--k", type=int, default=32)
     ap.add_argument("--placements", default="append,mid,document")
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--quant", default="none", choices=["none","4bit","8bit"],
+                    help="bitsandbytes quantization for big models (needs bitsandbytes)")
+    ap.add_argument("--device-map", default="none",
+                    help="\"auto\" to shard across visible GPUs (else single device)")
     ap.add_argument("--out", default="scale_detect.json")
     args = ap.parse_args()
     seeds = [int(x) for x in args.seeds.split(",")]
@@ -76,9 +80,21 @@ def main():
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.float16 if args.device == "cuda" else torch.float32,
-    ).to(args.device).eval()
+    load_kw = {}
+    if args.quant in ("4bit", "8bit"):
+        from transformers import BitsAndBytesConfig
+        load_kw["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=(args.quant == "4bit"), load_in_8bit=(args.quant == "8bit"),
+            bnb_4bit_compute_dtype=torch.float16, bnb_4bit_quant_type="nf4")
+        load_kw["device_map"] = "auto" if args.device_map == "none" else args.device_map
+    else:
+        load_kw["dtype"] = torch.float16 if args.device == "cuda" else torch.float32
+        if args.device_map != "none":
+            load_kw["device_map"] = args.device_map
+    model = AutoModelForCausalLM.from_pretrained(args.model, **load_kw)
+    if "device_map" not in load_kw:
+        model = model.to(args.device)
+    model = model.eval()
     fmt = make_fmt(tok)
     span = template_span(tok, fmt)
     L = model.config.num_hidden_layers
