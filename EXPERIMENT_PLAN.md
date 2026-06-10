@@ -104,3 +104,18 @@ Compute note: <=14B fits one H100 in fp16; 32-72B needs 2-4 H100 or 4-bit.
   scale trend must be visible. If not, narrow the model claim.
 - After step 4: if semantic generalization fails, reframe as lexical detection
   + the controllability result (still publishable, narrower).
+
+## Scale-up build (DONE — ready to launch)
+- `dobsteer/data.py`: benign corpora (HF Alpaca/Dolly w/ offline fallback);
+  36 injections in 6 families + 10 paraphrase/translation held-outs; 3
+  placements (append/mid/document).
+- `dobsteer/cache.py`: disk cache of layer-update tensors keyed by
+  (model, chat-text); extraction amortized across phases/seeds/models.
+- `dobsteer/run_scale_detect.py`: detection AUC under leave-one-FAMILY-out and
+  semantic (paraphrase/translation) generalization, seed mean+/-std, one model
+  per call. Cheap (no generation).
+- `run_sweep.py --use-data`: control ROC with held-out (3-way) threshold
+  calibration — fixes the flat-ROC quantile artifact.
+- `run_scale.sh`: model ladder (Qwen 0.5->14B, Llama 1->8B) + control sweep.
+
+Launch: `bash run_scale.sh`  (set N_BENIGN / SEEDS via env).

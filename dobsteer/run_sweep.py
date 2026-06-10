@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--tau", type=float, default=1.0)
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--max-test", type=int, default=20)
+    ap.add_argument("--use-data", action="store_true", help="draw benign from data.load_benign")
+    ap.add_argument("--n-benign", type=int, default=300)
     ap.add_argument("--out", default="sweep_results.json")
     args = ap.parse_args()
     seeds = [int(x) for x in args.seeds.split(",")]
@@ -48,7 +50,12 @@ def main():
     L = model.config.num_hidden_layers
     all_layers = list(range(L))
     det_layers = list(range(L // 4, 3 * L // 4))
-    n = len(BASE_PROMPTS)
+    if args.use_data:
+        from . import data
+        POOL = data.load_benign(n=args.n_benign, seed=999)
+    else:
+        POOL = BASE_PROMPTS
+    n = len(POOL)
     print(f"Model={args.model} seeds={seeds} fprs={fprs} k={args.k} "
           f"alpha={args.alpha} tau={args.tau} span={span}")
 
@@ -56,16 +63,19 @@ def main():
     for seed in seeds:
         g = torch.Generator().manual_seed(seed)
         perm = torch.randperm(n, generator=g).tolist()
-        prompts = [BASE_PROMPTS[i] for i in perm]
-        train_p = prompts[: n // 2]
-        test_p = prompts[n // 2:][: args.max_test]
+        prompts = [POOL[i] for i in perm]
+        n_tr = n // 3
+        n_ca = n // 3
+        train_p = prompts[:n_tr]
+        calib_p = prompts[n_tr:n_tr + n_ca]          # held-out for threshold
+        test_p = prompts[n_tr + n_ca:][: args.max_test]
 
         V, mu, sd, mbar, msd = fit_shared(model, tok, train_p, fmt, args.device,
                                           args.k, all_layers, span)
         gs = lambda text: gate_score(model, tok, text, args.device,
                                      V, mu, sd, mbar, msd, det_layers, span)
 
-        btr = torch.tensor([gs(fmt(p)) for p in train_p])
+        bca = torch.tensor([gs(fmt(p)) for p in calib_p])   # held-out benign for threshold
 
         # cache test attacks: (j, score, success_base, success_gated)
         atk = []
@@ -97,7 +107,7 @@ def main():
 
         rec = {"seed": seed, "gate_auc": gate_auc, "base_asr": base_asr, "fpr": {}}
         for fpr in fprs:
-            thr = torch.quantile(btr, 1.0 - fpr).item() if fpr > 0 else btr.max().item()
+            thr = torch.quantile(bca, 1.0 - fpr).item() if fpr > 0 else bca.max().item()
             test_fpr = sum(s > thr for s, _ in ben) / len(ben)
             tpr = sum(s > thr for s, _, _ in atk) / len(atk)
             asr = sum((sg if s > thr else sb) for s, sb, sg in atk) / len(atk)
