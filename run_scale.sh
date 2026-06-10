@@ -38,3 +38,12 @@ python -m dobsteer.run_sweep --model Qwen/Qwen2.5-7B-Instruct --device $DEV \
     --out results_scale/control_sweep_qwen7b.json 2>&1 | tee results_scale/control_sweep.log
 
 echo "=== DONE -> results_scale/ ==="
+
+echo "=== REFEREE: external baselines + hard-neg FPR + overhead ==="
+python -m dobsteer.run_baselines --model Qwen/Qwen2.5-7B-Instruct --device cuda \
+    --n-benign 200 --out results_scale/baselines_qwen7b.json 2>&1 | tee results_scale/baselines.log
+
+echo "=== REFEREE: adaptive white-box attack vs the gate ==="
+python -m dobsteer.run_adaptive --model Qwen/Qwen2.5-7B-Instruct --device cuda \
+    --lambdas 0,1,5,20 --soft-tokens 8 --steps 100 \
+    --out results_scale/adaptive_qwen7b.json 2>&1 | tee results_scale/adaptive.log
