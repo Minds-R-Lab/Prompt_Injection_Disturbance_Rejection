@@ -1,4 +1,11 @@
-"""Phase 1 v3: matched-filter disturbance detection.
+"""Phase 1 v4: matched-filter detection with confound controls.
+
+v3 hit AUC 1.000, which demands skepticism: all positives were APPENDED
+text, all negatives bare prompts. v4 controls for this:
+- negatives include benign-suffixed decoys (harmless appended sentences,
+  some containing attack-adjacent words like "system"/"instructions");
+- positives are evaluated both appended AND embedded mid-context.
+A detector that only spots "something was appended" will now fail.
 
 v2 plateaued at AUC ~0.77 with norm == proj, which is diagnostic: the SVD of
 raw injected residuals recovers generic benign variance directions, not the
@@ -23,7 +30,7 @@ import torch
 
 from .extraction import capture_trace
 from .surrogate import fit_ridge
-from .prompts import BASE_PROMPTS, INJECTIONS
+from .prompts import BASE_PROMPTS, INJECTIONS, BENIGN_SUFFIXES, place_mid
 
 
 def roc_auc(scores_pos, scores_neg) -> float:
@@ -102,10 +109,14 @@ def mf_scores(feats, v, mu, sd, mid):
     return z[:, mid].mean(-1).tolist()
 
 
-def mf_eval(get_feats, train_b, train_i, test_b, test_i, L):
-    """LOIO matched-filter evaluation. get_feats: trace -> (L, d)."""
+def mf_eval(get_feats, train_b, train_i, test_neg_traces, test_i, L):
+    """LOIO matched-filter evaluation.
+
+    test_neg_traces: list of benign traces used as negatives (bare prompts
+    AND benign-suffixed decoys). test_i: dict j -> list of injected traces
+    (any placement)."""
     fb_train = torch.stack([get_feats(t) for t in train_b])
-    fb_test = torch.stack([get_feats(t) for t in test_b])
+    fb_test = torch.stack([get_feats(t) for t in test_neg_traces])
     fi_train = {j: torch.stack([get_feats(t) for t in train_i[j]]) for j in train_i}
     fi_test = {j: torch.stack([get_feats(t) for t in test_i[j]]) for j in test_i}
     mid = list(range(L // 4, 3 * L // 4))
@@ -147,40 +158,62 @@ def main():
     print("  capturing traces...")
     train_b = [cap(p) for p in train_p]
     test_b = [cap(p) for p in test_p]
+    # decoy negatives: benign prompts with harmless APPENDED suffixes, so the
+    # detector cannot pass by detecting mere appending
+    test_b_sfx = [cap(p + s) for p in test_p for s in BENIGN_SUFFIXES]
     train_i = {j: [cap(p + inj) for p in train_p] for j, inj in enumerate(INJECTIONS)}
     test_i = {j: [cap(p + inj) for p in test_p] for j, inj in enumerate(INJECTIONS)}
+    # positional generalization: injection embedded MID-context
+    test_i_mid = {j: [cap(place_mid(p, inj)) for p in test_p]
+                  for j, inj in enumerate(INJECTIONS)}
     L = len(train_b[0].states) - 1
 
     print("  fitting surrogates...")
     models = fit_all_positions(train_b, lam=args.lam)
 
-    # 1) norm baseline
+    negatives = test_b + test_b_sfx     # bare + benign-suffixed decoys
+
+    # 1) norm baseline (suffix-controlled negatives)
     mu, sd = norm_stats(train_b, models)
-    neg = [score_norm(t, models, mu, sd) for t in test_b]
+    neg = [score_norm(t, models, mu, sd) for t in negatives]
     auc_norm, all_pos = {}, []
     for j in test_i:
         pos = [score_norm(t, models, mu, sd) for t in test_i[j]]
         auc_norm[j] = roc_auc(pos, neg); all_pos += pos
     pooled_norm = roc_auc(all_pos, neg)
 
-    # 2) matched filter on raw updates
-    auc_upd, pooled_upd = mf_eval(updates_last, train_b, train_i, test_b, test_i, L)
+    # 2) matched filter on raw updates — appended and mid-context positives
+    auc_upd, pooled_upd = mf_eval(updates_last, train_b, train_i, negatives, test_i, L)
+    auc_upd_m, pooled_upd_m = mf_eval(updates_last, train_b, train_i, negatives,
+                                      test_i_mid, L)
 
     # 3) matched filter on surrogate residuals (DOB)
     auc_res, pooled_res = mf_eval(lambda t: residuals_last(t, models),
-                                  train_b, train_i, test_b, test_i, L)
+                                  train_b, train_i, negatives, test_i, L)
+    auc_res_m, pooled_res_m = mf_eval(lambda t: residuals_last(t, models),
+                                      train_b, train_i, negatives, test_i_mid, L)
 
-    print("\n  AUC per injection (norm / mf-upd / mf-res, LOIO):")
+    print(f"\n  Negatives: {len(test_b)} bare + {len(test_b_sfx)} benign-suffixed decoys")
+    print("  AUC per injection (norm / mf-upd / mf-res | mid: mf-upd / mf-res), LOIO:")
     for j, inj in enumerate(INJECTIONS):
-        print(f"    {j}: {auc_norm[j]:.3f} / {auc_upd[j]:.3f} / {auc_res[j]:.3f}  {inj[:40]!r}")
-    print(f"\n  Pooled AUC  norm={pooled_norm:.3f}  mf-upd={pooled_upd:.3f}  "
+        print(f"    {j}: {auc_norm[j]:.3f} / {auc_upd[j]:.3f} / {auc_res[j]:.3f} | "
+              f"mid: {auc_upd_m[j]:.3f} / {auc_res_m[j]:.3f}  {inj[:35]!r}")
+    print(f"\n  Pooled  appended: norm={pooled_norm:.3f} mf-upd={pooled_upd:.3f} "
           f"mf-res={pooled_res:.3f}")
-    best = max(pooled_norm, pooled_upd, pooled_res)
-    print(f"  H2 verdict: {'PASS' if best > 0.9 else 'FAIL'} @ 0.90 (best={best:.3f})")
+    print(f"  Pooled  mid-ctx : mf-upd={pooled_upd_m:.3f} mf-res={pooled_res_m:.3f}")
+    best = max(pooled_upd, pooled_res)
+    best_m = max(pooled_upd_m, pooled_res_m)
+    print(f"  H2 verdict (appended, suffix-controlled): "
+          f"{'PASS' if best > 0.9 else 'FAIL'} @ 0.90 (best={best:.3f})")
+    print(f"  H2 verdict (mid-context)               : "
+          f"{'PASS' if best_m > 0.9 else 'FAIL'} @ 0.90 (best={best_m:.3f})")
 
-    torch.save({"model": args.model, "auc_norm": auc_norm, "auc_upd": auc_upd,
-                "auc_res": auc_res, "pooled": {"norm": pooled_norm,
-                "upd": pooled_upd, "res": pooled_res}}, args.out)
+    torch.save({"model": args.model, "auc_norm": auc_norm,
+                "auc_upd": auc_upd, "auc_res": auc_res,
+                "auc_upd_mid": auc_upd_m, "auc_res_mid": auc_res_m,
+                "pooled": {"norm": pooled_norm, "upd": pooled_upd,
+                           "res": pooled_res, "upd_mid": pooled_upd_m,
+                           "res_mid": pooled_res_m}}, args.out)
     print(f"Saved: {args.out}")
 
 
