@@ -130,13 +130,15 @@ def main():
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--taus", default="3.0", help="comma list, benign-sigma units")
-    ap.add_argument("--alpha", type=float, default=1.0)
+    ap.add_argument("--alphas", default="1.0", help="comma list of cancellation gains")
+    ap.add_argument("--layers", default="mid", choices=["mid","all"])
     ap.add_argument("--k", type=int, default=16)
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--max-test", type=int, default=20)
     ap.add_argument("--out", default="phase2_results.json")
     args = ap.parse_args()
     taus = [float(x) for x in args.taus.split(",")]
+    alphas = [float(x) for x in args.alphas.split(",")]
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model)
@@ -149,7 +151,7 @@ def main():
     train_p = BASE_PROMPTS[: n // 2]
     test_p = BASE_PROMPTS[n // 2:][: args.max_test]
     L = model.config.num_hidden_layers
-    layers = list(range(L // 4, 3 * L // 4))
+    layers = list(range(L)) if args.layers=="all" else list(range(L // 4, 3 * L // 4))
     print(f"Model={args.model} alpha={args.alpha} k={args.k} layers={layers[0]}-{layers[-1]}")
 
     print("  fitting injection subspace + calibrated benign stats...")
@@ -178,11 +180,11 @@ def main():
 
     sweep = []
     for tau in taus:
-        print(f"  --- tau={tau} ---")
-        ctl = Canceller(V, mu, sd, mbar, msd, tau, args.alpha)
+      for alpha in alphas:
+        print(f"  --- tau={tau} alpha={alpha} ---")
+        ctl = Canceller(V, mu, sd, mbar, msd, tau, alpha)
         deff, gens, inj_e = eval_asr(ctl)
-        # benign KL + benign energy
-        kls, cb = [], Canceller(V, mu, sd, mbar, msd, tau, args.alpha)
+        kls, cb = [], Canceller(V, mu, sd, mbar, msd, tau, alpha)
         for p in test_p:
             lp = torch.log_softmax(next_logits(model, tok, fmt(p), args.device), -1)
             cb.attach(model)
@@ -191,7 +193,7 @@ def main():
             kls.append(float((lp.exp() * (lp - lq)).sum()))
         md = sum(deff.values()) / 5
         ben_e = cb.energy / max(cb.count, 1)
-        row = {"tau": tau, "asr": deff, "mean_asr": md,
+        row = {"tau": tau, "alpha": alpha, "asr": deff, "mean_asr": md,
                "benign_kl": sum(kls)/len(kls), "benign_energy": ben_e,
                "injected_energy": inj_e}
         sweep.append(row)
@@ -199,9 +201,9 @@ def main():
               f"benignKL={row['benign_kl']:.4f}  "
               f"E_benign={ben_e:.2f}  E_injected={inj_e:.2f}")
 
-    print(f"\n  {'tau':>5} {'meanASR':>8} {'benKL':>8} {'E_ben':>8} {'E_inj':>8}")
+    print(f"\n  {'tau':>5} {'alpha':>6} {'meanASR':>8} {'benKL':>8} {'E_ben':>8} {'E_inj':>8}")
     for r in sweep:
-        print(f"  {r['tau']:>5.1f} {r['mean_asr']:>8.2f} {r['benign_kl']:>8.4f} "
+        print(f"  {r['tau']:>5.1f} {r['alpha']:>6.1f} {r['mean_asr']:>8.2f} {r['benign_kl']:>8.4f} "
               f"{r['benign_energy']:>8.2f} {r['injected_energy']:>8.2f}")
     best = min(sweep, key=lambda r: r["mean_asr"])
     print(f"  best: tau={best['tau']} ASR {mb:.2f}->{best['mean_asr']:.2f}  "
