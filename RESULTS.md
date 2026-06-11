@@ -69,3 +69,41 @@ push TPR->1, ASR->~0.02 at near-zero benign KL -- traced by run_sweep.
 Seed stability (5 seeds) + target-FPR ROC (run_sweep), Phase-2 Pareto, and
 Phase-1 across 3 families. All scaffold-correct (content-aware fitting ported
 into Phase 2). Run before scaling.
+
+## SCALED detection: LOFO + semantic generalization (Qwen2.5 ladder, 3 seeds)
+
+benign=400 (Alpaca/Dolly), 6 hand-built injection families + wild_deepset
+(external benchmark), 3 placements (append/mid/document). LOFO = leave-one-
+attack-FAMILY-out. SEM = fit on canonical families, test on paraphrase+translation.
+
+| Model | params | LOFO pooled | SEM | wild_deepset (LOFO) |
+|---|---|---|---|---|
+| Qwen2.5-0.5B-Instruct | 0.5B | 0.888 +/- 0.010 | 0.887 +/- 0.009 | 0.808 |
+| Qwen2.5-1.5B-Instruct | 1.5B | 0.918 +/- 0.004 | 0.951 +/- 0.005 | 0.881 |
+| Qwen2.5-3B-Instruct   | 3B   | 0.965 +/- 0.003 | 0.980 +/- 0.001 | 0.947 |
+| Qwen2.5-7B-Instruct   | 7B   | 0.979 +/- 0.003 | 0.992 +/- 0.002 | 0.966 |
+| Qwen2.5-14B-Instruct  | 14B  | 0.979 +/- 0.003 | 0.997 +/- 0.001 | 0.969 |
+
+Monotone scale trend on all three columns. Per-family LOFO (7B): ignore 1.00,
+system_spoof 1.00, exfiltration 0.998, dev_imp 0.996, payload 0.999,
+roleplay 0.996, wild_deepset 0.966.
+
+## SCALED control: detect-then-cancel ROC (Qwen2.5-7B-Instruct, 3 seeds, held-out calib)
+
+Gate AUC 0.995 +/- 0.001. Base ASR 0.91. k=32, alpha=3, tau=1.
+
+| target FPR | test FPR | TPR | ASR | benign KL |
+|---|---|---|---|---|
+| 0.00 | 0.00 | 0.81 | 0.19 | 0.000 |
+| 0.01 | 0.02 | 0.87 | 0.15 | 0.18 |
+| 0.02 | 0.02 | 0.94 | 0.08 | 0.18 |
+| 0.05 | 0.03 | 0.96 | 0.06 | 0.37 |
+| 0.10 | 0.09 | 0.97 | 0.05 | 1.28 |
+
+Two operating points: zero-benign-cost (FPR 0: ASR 0.91->0.19) and
+stronger-suppression (FPR 0.02: ASR 0.91->0.08, 91% reduction). KL rises with
+FPR because falsely-gated benign prompts receive the aggressive alpha=3
+cancellation -> motivates gentler cancellation on gated prompts (future work).
+
+NOTE: Llama models gated (401) -> need `huggingface-cli login`. 32B fp16 +
+70B/72B 4-bit ready via run_big.sh.
