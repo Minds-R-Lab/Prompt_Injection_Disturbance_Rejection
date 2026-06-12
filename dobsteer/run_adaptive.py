@@ -4,8 +4,13 @@ Threat model: the attacker KNOWS the detector (injection direction, benign
 stats, threshold) and appends a continuous "soft" adversarial suffix INSIDE
 the user content (after the injection, before the chat-template suffix -- the
 region a real attacker controls) optimized to MINIMIZE the gate score, i.e.
-to evade detection. This soft-embedding attack is a strong UPPER BOUND on a
-gradient attacker's evasion power against THIS detector.
+to evade detection. The soft tokens are placed as a PREFIX at the START of
+the user content (causally UPSTREAM of the injection) so they can actually
+influence the residual-stream updates at the injected tokens; an appended
+suffix cannot, by causality, change upstream injection-position activations,
+so position-scanning detection is structurally immune to append-suffix
+evasion (we note this separately). This soft-embedding prefix attack is a
+strong UPPER BOUND on a gradient attacker's evasion power.
 
 For each injected prompt we measure, at a benign-calibrated threshold:
   detection rate -- fraction flagged by the gate (want: stays high = robust);
@@ -32,11 +37,11 @@ def emb_of(model, ids):
     return model.get_input_embeddings()(ids)
 
 
-def build_embeds(model, ids, soft, hi):
-    """Insert soft (S,d) into the token-embedding sequence at content end `hi`
-    (after injection, before template suffix). ids: (T,) long. Returns (1,T+S,d)."""
+def build_embeds(model, ids, soft, at):
+    """Insert soft (S,d) into the token-embedding sequence at index `at`.
+    ids: (T,) long. Returns (1,T+S,d)."""
     e = emb_of(model, ids)                       # (T,d)
-    e = torch.cat([e[:hi], soft, e[hi:]], 0)     # (T+S,d)
+    e = torch.cat([e[:at], soft, e[at:]], 0)     # (T+S,d)
     return e.unsqueeze(0)
 
 
@@ -110,8 +115,8 @@ def main():
     for p in attack_p:
         text = fmt(p + inj)
         ids = tok(text, return_tensors="pt").input_ids[0].to(args.device)
-        T = ids.shape[0]; hi = content_slice(T, span[0], span[1])[1]
-        enc_cache.append((ids, hi))
+        T = ids.shape[0]; lo = content_slice(T, span[0], span[1])[0]
+        enc_cache.append((ids, lo))   # prefix insertion point: start of user content
         base_flag.append(gs(text) > thr)
         with torch.no_grad():
             e0 = emb_of(model, ids).unsqueeze(0)
@@ -122,7 +127,7 @@ def main():
     results = {"threshold": thr, "base_det": b_det, "base_asr": b_asr, "by_lambda": {}}
     for lam in lambdas:
         det_flags, asr_flags = [], []
-        for (ids, hi) in enc_cache:
+        for (ids, at) in enc_cache:
             if lam == 0:
                 soft = torch.zeros(args.soft_tokens, d, device=args.device)
             else:
@@ -130,13 +135,13 @@ def main():
                 opt = torch.optim.Adam([soft], lr=0.05)
                 for _ in range(args.steps):
                     opt.zero_grad()
-                    s = score_embeds(model, build_embeds(model, ids, soft, hi),
+                    s = score_embeds(model, build_embeds(model, ids, soft, at),
                                      V, mu, sd, mbar, msd, det_layers, span)
                     (lam * s).backward()
                     opt.step()
                 soft = soft.detach()
             with torch.no_grad():
-                e = build_embeds(model, ids, soft, hi)
+                e = build_embeds(model, ids, soft, at)
                 det_flags.append(float(score_embeds(model, e, V, mu, sd, mbar, msd, det_layers, span)) > thr)
                 asr_flags.append(asr_from_embeds(model, tok, e, markers))
         det = sum(det_flags) / len(det_flags); asr = sum(asr_flags) / len(asr_flags)
