@@ -134,3 +134,18 @@ Finding: a white-box attacker CAN evade the single-direction linear detector
 detected direction coincide. This is an UPPER BOUND (continuous soft attack);
 a discrete attacker is weaker. Hardening: score/cancel on the full k-dim
 subspace or a randomized ensemble of directions to raise the evasion cost.
+
+## BASELINES + hard-negative FPR + overhead (Qwen2.5-7B-Instruct, 200 benign)
+
+| Detector | AUC (LOFO pooled) | trained? | hard-neg FPR |
+|---|---|---|---|
+| matched filter (ours) | 0.984 | no  | 0.00 |
+| linear probe          | 0.966 | yes | -- |
+| perplexity filter     | 0.835 | no  | -- |
+
+- Ours beats the TRAINED linear probe while being training-free; perplexity is
+  weak (catches gibberish suffixes, not clean injections).
+- hard-neg FPR 0.00 on benign prompts that legitimately contain instructions
+  ("summarize this email...") => detector keys on INJECTION, not imperativeness
+  (referee Q5 resolved).
+- Overhead: detection forward pass 23.8 ms/prompt + position scan 4.15 ms/prompt.
