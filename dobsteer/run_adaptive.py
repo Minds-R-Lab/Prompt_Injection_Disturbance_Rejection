@@ -35,7 +35,7 @@ def soft_score(model, tok, ids_prefix, soft, det_layers, V, mu, sd, mbar, msd, s
     [embed(ids_prefix) ; soft]. Returns scalar detector score (mean-pool variant
     of the position scan so it is smooth in `soft`)."""
     emb = embed_layer(model)
-    e_prefix = emb(ids_prefix)                      # (1,Tp,d)
+    e_prefix = emb(ids_prefix).unsqueeze(0)         # (1,Tp,d)
     e = torch.cat([e_prefix, soft.unsqueeze(0)], 1) # (1,Tp+S,d)
     out = model(inputs_embeds=e, output_hidden_states=True)
     xs = torch.stack([h[0] for h in out.hidden_states])  # (Lp1,T,d)
