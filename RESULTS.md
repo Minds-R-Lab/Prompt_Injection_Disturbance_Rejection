@@ -107,3 +107,30 @@ cancellation -> motivates gentler cancellation on gated prompts (future work).
 
 NOTE: Llama models gated (401) -> need `huggingface-cli login`. 32B fp16 +
 70B/72B 4-bit ready via run_big.sh.
+
+## ADAPTIVE (white-box) attack vs the gate (Qwen2.5-7B-Instruct)
+
+Soft-embedding evasion attack, target-FPR 0.05 threshold, 20 attack prompts,
+injection = instruction-override. Two placements of the adversarial soft tokens:
+
+- APPEND (suffix after injection): detection stays 1.00 at all lambda --
+  structurally immune (causality: tokens after the injection cannot change the
+  injection-position activations the scan fires on).
+- PREFIX (soft tokens at start of user content, causally upstream): the fair
+  white-box test.
+
+PREFIX attack (detection / ASR, base -> attacked):
+| lambda | detection | ASR |
+|---|---|---|
+| base   | 1.00 | 0.80 |
+| 0 (noop) | 1.00 | 0.95 |
+| 1      | 0.05 | 0.60 |
+| 5      | 0.00 | 0.50 |
+| 20     | 0.05 | 0.45 |
+
+Finding: a white-box attacker CAN evade the single-direction linear detector
+(detection 1.00 -> ~0), but only by degrading its own attack success ~44%
+(ASR 0.80 -> 0.45). Evasion is costly because the injection signal and the
+detected direction coincide. This is an UPPER BOUND (continuous soft attack);
+a discrete attacker is weaker. Hardening: score/cancel on the full k-dim
+subspace or a randomized ensemble of directions to raise the evasion cost.
