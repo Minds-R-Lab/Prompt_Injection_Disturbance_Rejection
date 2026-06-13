@@ -30,8 +30,8 @@ def last_content(u, span):              # u: (L,T,d) -> (L,d)
 def fit_detector(bxs, ixs, layers, k, span):
     """bxs: list of benign update tensors; ixs: list of injected update tensors.
     Returns V (subspace), coord mean/sd, Mahalanobis mean/std per layer."""
-    fb = torch.stack([last_content(u, span) for u in bxs])          # (Nb,L,d)
-    fi = torch.stack([last_content(u, span) for u in ixs])          # (Ni,L,d)
+    fb = torch.nan_to_num(torch.stack([last_content(u, span) for u in bxs]))   # (Nb,L,d)
+    fi = torch.nan_to_num(torch.stack([last_content(u, span) for u in ixs]))   # (Ni,L,d)
     D = fi - fb.mean(0, keepdim=True)                               # mean-centered
     V = {}
     for l in layers:
@@ -69,6 +69,8 @@ def main():
     ap.add_argument("--k", type=int, default=32)
     ap.add_argument("--placements", default="append,mid,document")
     ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument("--dtype", default="fp16", choices=["fp16","bf16","fp32"],
+                    help="bf16 recommended for Gemma-2 (fp16 overflows -> NaN)")
     ap.add_argument("--quant", default="none", choices=["none","4bit","8bit"],
                     help="bitsandbytes quantization for big models (needs bitsandbytes)")
     ap.add_argument("--device-map", default="none",
@@ -88,7 +90,8 @@ def main():
             bnb_4bit_compute_dtype=torch.float16, bnb_4bit_quant_type="nf4")
         load_kw["device_map"] = "auto" if args.device_map == "none" else args.device_map
     else:
-        load_kw["dtype"] = torch.float16 if args.device == "cuda" else torch.float32
+        _dt = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
+        load_kw["dtype"] = _dt if args.device == "cuda" else torch.float32
         if args.device_map != "none":
             load_kw["device_map"] = args.device_map
     model = AutoModelForCausalLM.from_pretrained(args.model, **load_kw)
