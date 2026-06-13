@@ -149,3 +149,16 @@ subspace or a randomized ensemble of directions to raise the evasion cost.
   ("summarize this email...") => detector keys on INJECTION, not imperativeness
   (referee Q5 resolved).
 - Overhead: detection forward pass 23.8 ms/prompt + position scan 4.15 ms/prompt.
+
+## CROSS-FAMILY: Gemma-2 detection ladder (bf16, 3 seeds, 400 benign)
+
+| Gemma-2 | LOFO pooled | SEM | wild (LOFO) |
+|---|---|---|---|
+| 2b  | 0.971 +/- 0.001 | 0.991 +/- 0.000 | 0.951 |
+| 9b  | 0.977 +/- 0.003 | 0.999 +/- 0.000 | 0.970 |
+| 27b | 0.963 +/- 0.006 | 0.996 +/- 0.001 | 0.924 |
+
+Cross-family confirmation: detection uniformly high (LOFO 0.96-0.98, SEM >=0.99)
+on a different family/tokenizer/chat-template. Saturated by 2b (not monotone
+like Qwen) -> strength tracks representation quality, not param count. Gemma-2
+needs bf16 (fp16 overflows -> NaN). Cache is now dtype-aware.
