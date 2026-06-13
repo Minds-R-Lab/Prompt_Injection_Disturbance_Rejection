@@ -25,8 +25,8 @@ def _key(model_id, text):
     return h
 
 
-def _path(model_id, text):
-    safe = model_id.replace("/", "_")
+def _path(model_id, text, tag=""):
+    safe = model_id.replace("/", "_") + (("_" + tag) if tag else "")
     d = os.path.join(CACHE_DIR, safe)
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, _key(model_id, text) + ".pt")
@@ -36,7 +36,11 @@ def _path(model_id, text):
 def updates(model, tok, model_id, text, device, use_cache=True):
     """Return layer-update tensor (L, T, d) fp16 for `text` (already a final
     string, e.g. chat-formatted). Cached to disk per (model_id, text)."""
-    p = _path(model_id, text)
+    try:
+        tag = str(next(model.parameters()).dtype).replace("torch.", "")
+    except Exception:
+        tag = ""
+    p = _path(model_id, text, tag)
     if use_cache and os.path.exists(p):
         try:
             return torch.load(p, map_location="cpu")
@@ -44,7 +48,7 @@ def updates(model, tok, model_id, text, device, use_cache=True):
             pass
     tr = capture_trace(model, tok, text, device)
     x = torch.stack(tr.states)            # (L+1, T, d)
-    u = (x[1:] - x[:-1]).half().cpu()     # (L, T, d) fp16
+    u = torch.nan_to_num(x[1:] - x[:-1]).half().cpu()   # (L, T, d) fp16, NaN-guarded
     if use_cache:
         tmp = p + ".tmp"
         torch.save(u, tmp); os.replace(tmp, p)

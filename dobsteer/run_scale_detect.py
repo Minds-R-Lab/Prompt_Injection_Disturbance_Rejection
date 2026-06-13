@@ -24,7 +24,7 @@ from .run_phase3 import template_span, content_slice, roc_auc
 
 def last_content(u, span):              # u: (L,T,d) -> (L,d)
     lo, hi = content_slice(u.shape[1], span[0], span[1])
-    return u[:, hi - 1, :].float()
+    return torch.nan_to_num(u[:, hi - 1, :].float())
 
 
 def fit_detector(bxs, ixs, layers, k, span):
