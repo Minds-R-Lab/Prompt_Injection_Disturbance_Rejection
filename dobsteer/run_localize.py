@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--k", type=int, default=32)
     ap.add_argument("--ablate-strength", type=float, default=1.0)
     ap.add_argument("--pos-fpr", type=float, default=0.01)
+    ap.add_argument("--pad", type=int, default=2, help="tokens to pad each side of the localized span")
     ap.add_argument("--gate-fpr", type=float, default=0.02)
     ap.add_argument("--placement", default="mid", choices=["append", "mid", "document"])
     ap.add_argument("--n-fit", type=int, default=60)
@@ -136,10 +137,20 @@ def main():
 
     def localize_positions(text):
         lo, hi, zp = per_position_z(model, tok, text, args.device, V, mu, sd, mbar, msd, det_layers, span)
-        pos = [lo + i for i in range(hi - lo) if zp[i] > pos_thr]
-        if not pos:
-            pos = [lo + int(zp.argmax())]
-        return pos
+        # expand the contiguous injected span around the peak (the z-bump),
+        # not just the peak token, so the whole injection is covered.
+        peak = float(zp.max())
+        loc_thr = max(pos_thr, 0.4 * peak)
+        am = int(zp.argmax())
+        a = am
+        while a - 1 >= 0 and float(zp[a - 1]) > loc_thr:
+            a -= 1
+        b = am
+        while b + 1 < zp.shape[0] and float(zp[b + 1]) > loc_thr:
+            b += 1
+        a = max(0, a - args.pad)
+        b = min(zp.shape[0] - 1, b + args.pad)
+        return [lo + j for j in range(a, b + 1)]
 
     def gen_plain(text):
         return generate(model, tok, text, args.device, args.max_new)
