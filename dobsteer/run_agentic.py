@@ -50,6 +50,9 @@ def main():
     ap.add_argument("--n-fit", type=int, default=60)
     ap.add_argument("--n-eval", type=int, default=24)
     ap.add_argument("--max-new", type=int, default=64)
+    ap.add_argument("--placement", default="document",
+                    choices=["append", "mid", "document"],
+                    help="injection placement; append/mid match the headline ASR setting")
     ap.add_argument("--out", default="agentic.json")
     args = ap.parse_args()
 
@@ -98,7 +101,7 @@ def main():
         fam = eval_fams[i % len(eval_fams)]
         inj = fams[fam][0]["text"]
         intent = INTENT.get(fam, "obey the injected instruction")
-        doc = place(task, inj, "document")                  # injection embedded in a passage
+        doc = place(task, inj, args.placement)              # injection placement (see --placement)
         b = generate(model, tok, fmt(doc), args.device, args.max_new)
         d, gated = gated_generate(fmt(doc)); n_gated += int(gated)
         c, _ = gated_generate(fmt(task))                    # clean (no injection)
