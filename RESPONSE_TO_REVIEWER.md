@@ -1,92 +1,47 @@
-# Response to Reviewer (second round)
+# Response to Reviewer (third round / camera-ready)
 
-We thank the reviewer for the careful second-round review and the upgraded
-recommendation (Accept / minor-to-moderate revision). We were glad the
-disturbance-rejection framing, the leave-one-family-out and semantic
-generalization, the adaptive-attacker analysis, and the candor in §7 landed as
-intended. Below we respond point-by-point to the five remaining items; the two
-flagged as gating an unqualified accept (LLM-judged ASR and the internal-model
-term) are addressed with new experiments.
+We thank the reviewer for the generous reading and the Accept. The decisive step
+was the one the reviewer pressed for in both prior rounds: scoring the defense
+with an LLM judge rather than string markers. It overturned our headline
+"detect-then-cancel" result, and we rebuilt the paper around that finding.
 
-## W1 — ASR is string-marker based; does cancellation preserve utility? (also Q4)
+## The pivot (what changed since draft 2)
 
-Addressed with a new LLM-judged, task-execution evaluation (new §, Table:
-`run_agentic.py`). For indirect-injection inputs (a benign task plus a document
-with a mid-passage injection) an independent judge model scores each output on
-two axes: *hijacked* (did it obey the injection?) and *task\_done* (did it still
-complete the user's task?). We report three conditions:
+- Re-scored the exact detect-then-cancel defense with a behavioral judge
+  (hijacked? task completed?). It provides essentially no protection
+  (hijacked 0.88->0.96, task 0.12->0.04); the marker metric overstated it ~3-4x.
+- The paper no longer claims a defense. New title: "...A Detector, and the
+  Localization Barrier to Activation-Space Mitigation."
+- Old marker-based defense tables (Tables 6-7 in draft 2) REMOVED; replaced by a
+  single LLM-judge table (Table 6 now) including an oracle row.
+- Oracle (remove the known injection): hijacked 0.88->0.04, task ->1.00 ->
+  isolates faithful localization, not the removal mechanism, as the open problem.
+- Detector results unchanged (none depended on the defense): LOFO 0.98, SEM
+  0.997, scaling 0.5-14B, Gemma-2 cross-family, beats trained probe, 0.00
+  hard-neg FPR, adaptive causality argument.
 
-- no defense (attack present),
-- detect-then-cancel,
-- clean input, defended (no injection).
+## Remaining points
 
-This directly answers Q4: it shows whether the cancelled output completes the
-benign task or merely degrades into marker-free incoherence, and the clean-input
-row confirms the defense leaves benign utility untouched. The headline
-suppression numbers are re-reported under the judge alongside task-retention, so
-they are no longer upper bounds resting on heuristic scoring.
+1. **Power up Section 7 (the insisted item).** Agreed; this is the camera-ready
+   priority. The harness (`run_localize.py`) takes `--n-eval`, `--placement`
+   {append,mid,document}, and `--model`, and now reports a 95% Wilson CI on the
+   hijacked rate. For camera-ready we repeat Table 6 at n=60, on a second model
+   (Qwen2.5-14B-Instruct), and at appended placement, and report CIs.
+2. **The 3-4x multiplier.** Restated as an observed ratio on this task set, not a
+   constant; the qualitative overstatement is robust, the multiplier is not.
+   CIs are now produced by the harness and will accompany the powered-up numbers.
+3. **GCG / agentic suite.** `run_gcg.py` (discrete optimized attack) and
+   `run_agentic.py` (LLM-judged task-execution) are in the repo; we will fold a
+   discrete attack and an agentic-style benchmark into camera-ready so our own
+   evaluation meets the behavioral standard we urge on others.
+4. **Internal-model term (Eq. 6).** Trimmed; kept minimal and explicitly marked
+   not load-bearing (cancellation fails with or without it).
+5. Minor: (a) abstract pivot tightened; (b) "(marker ASR 0.18)" parenthetical
+   kept in Table 6; (c) clean (no-injection) baseline now a row in Table 6.
 
-## W2 — The internal-model term (Eq. 6) is unevaluated
-
-Addressed with a new persistent-injection experiment (`run_persist.py`). We use
-a *persistent* injection ("append HACKED to the end of every sentence"), which
-re-arrives at every sentence of the generation, and compare three controllers
-during autoregressive decoding:
-
-- no defense,
-- static (memoryless) cancellation $u_t=-g\,\hat d_t$,
-- the token-axis internal model $z_{t+1}=z_t+K(\hat d_t-z_t),\ u_t=-g(\hat d_t+z_t)$.
-
-We report marker occurrences in growing token windows (24/48/72/96) plus a
-benign-drift check. The intended result — static suppression decaying as the
-generation lengthens while the internal model keeps the marker suppressed — makes
-the dynamical formulation load-bearing rather than motivational, exactly the bar
-the reviewer set in the closing sentence. (Result pending the run; the harness is
-in the released code.)
-
-## W3 — No standard agentic benchmark / discrete optimized attack
-
-Addressed on both fronts. (i) A discrete GCG-style optimized attack
-(`run_gcg.py`) complements the soft-embedding upper bound: greedy coordinate
-gradient crafts an adversarial injection of real tokens that jointly elicits the
-attack marker and minimizes the gate score; sweeping the evasion weight traces
-the discrete tradeoff. (ii) The agentic task-execution evaluation above
-(`run_agentic.py`) reports the resist-AND-complete metric the reviewer asked for,
-with an LLM judge scoring both injection-resistance and task completion on
-document-embedded indirect injections. We position these honestly as a discrete
-optimized attack and a lightweight agentic proxy; full AgentDojo/BIPIA tool-use
-suites remain complementary future work.
-
-## W4 — Propositions deferred to a companion paper
-
-Done. Proposition 1 (minimal intervention) is proved in-text (it is short and
-self-contained). Proposition 2 (ISS) has been **demoted to a Conjecture** and is
-explicitly motivated empirically rather than claimed; we removed the "guarantees
-deferred to a companion treatment" framing. The paper now states plainly which
-result is proved and which is conjectured.
-
-## W5 — Minor
-
-- **(a) Abstract length.** Trimmed substantially (~40% shorter); it no longer
-  enumerates every sub-result.
-- **(b) Soatto et al. author list.** Fixed. The correct list is Soatto,
-  Tabuada, Chaudhari, and Tian Yu Liu (verified against the arXiv/DBLP record);
-  the earlier draft's list was erroneous. (We also re-verified every cited
-  reference's title, venue, year, and authors against primary sources, and added
-  Arditi et al. 2024 and ARGUS 2025.)
-- **(c) CI on the 0.00 FPR.** Added. We now report a one-sided Wilson 95% upper
-  bound ($\approx 1\%$ on the 400-prompt pool) rather than a bare $0.00$, in both
-  the operating-curve text and the table caption.
-
-## Summary of new material
-
-| Reviewer item | New artifact | What it shows |
-|---|---|---|
-| W1 / Q4 | `run_agentic.py` (LLM judge) | ASR down with task-completion preserved; clean utility untouched |
-| W2 | `run_persist.py` | internal model beats static cancellation on persistent injections |
-| W3 | `run_gcg.py` + agentic eval | discrete optimized attack + resist-AND-complete metric |
-| W4 | paper edit | Prop 1 proved; Prop 2 → Conjecture |
-| W5a/b/c | paper edits | abstract trimmed; citation fixed; Wilson CI on FPR |
-
-We believe these changes close the two gating items and convert the framing from
-"elegant motivation" to a tested, load-bearing component.
+## Camera-ready checklist
+- [ ] Table 6 at n=60, +Qwen2.5-14B-Instruct, +appended placement, with CIs.
+- [ ] One discrete (GCG) attack + one agentic benchmark.
+- [x] 3-4x stated as observed ratio + CI support.
+- [x] Eq. 6 trimmed.
+- [x] Clean baseline as a Table-6 row.
