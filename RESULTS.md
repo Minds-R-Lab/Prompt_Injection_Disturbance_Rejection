@@ -162,3 +162,45 @@ Cross-family confirmation: detection uniformly high (LOFO 0.96-0.98, SEM >=0.99)
 on a different family/tokenizer/chat-template. Saturated by 2b (not monotone
 like Qwen) -> strength tracks representation quality, not param count. Gemma-2
 needs bf16 (fp16 overflows -> NaN). Cache is now dtype-aware.
+
+## MITIGATION (LLM-judged) — NEGATIVE RESULT (the pivot)
+
+String-marker ASR is misleading. Re-scored with an LLM judge (hijacked = obeyed
+injection; task_done = completed user task), the detect-then-cancel "defense"
+provides essentially no behavioral protection. Confirmed across placements and
+five activation-space mitigations.
+
+Agentic / indirect-injection (Qwen2.5-7B-Instruct, judge, 24 tasks):
+
+| placement | no-defense (hij/task) | detect-then-cancel (hij/task) | clean task |
+|---|---|---|---|
+| append   | 0.83 / 0.08 | 1.00 / 0.00 | 0.96 |
+| mid      | 0.88 / 0.12 | 0.96 / 0.04 | 0.96 |
+| document | 1.00 / 0.00 | 1.00 / 0.00 | 0.96 |
+
+Localized mitigations (mid, full-span localization ~12.9 tok, gated 18/24):
+
+| mitigation | hijacked | task_done |
+|---|---|---|
+| none | 0.88 | 0.12 |
+| localize-ablate (subspace at injected span) | 0.67 | 0.38 |
+| localize-mask (attention to injected span)  | 0.67 | 0.21 |
+| detect-excise (drop injected span)          | 0.71 | 0.25 |
+| oracle-excise (KNOWN injection removed)     | 0.04 | 1.00 |
+| clean (no injection)                        | --   | 0.96 |
+
+Key findings:
+- Marker ASR (0.18) overstates the defense by 3-4x vs judge (~0.67-0.96 hijacked).
+- All activation-space mitigations (cancel @ generation, token-axis integrator,
+  subspace ablation, attention masking, span excision) FAIL to stop hijacking.
+- ORACLE (remove the known injection) works: 0.88->0.04 hijacked, task->1.00.
+  => the judge/eval are sound; mitigation is achievable in principle; the
+  bottleneck is FAITHFUL LOCALIZATION, not the removal mechanism.
+- Internal-model (Eq.6) sweep: K=0.8 zeroed markers but judge hijacked stayed
+  1.00, task fell to 0.08 (marker scrubbing != defense).
+
+Paper pivot: detector (strong, unchanged) + honest negative on activation-space
+mitigation + localization-barrier framing + oracle ceiling. Defense tables
+(old tab:phase3 / tab:roc, marker-based) REMOVED from the paper; replaced by the
+judge table (tab:mitigate). Harnesses: run_agentic.py, run_persist.py,
+run_localize.py (ablate/mask/excise/oracle).
