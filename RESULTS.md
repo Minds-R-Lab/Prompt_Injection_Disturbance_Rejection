@@ -204,3 +204,34 @@ mitigation + localization-barrier framing + oracle ceiling. Defense tables
 (old tab:phase3 / tab:roc, marker-based) REMOVED from the paper; replaced by the
 judge table (tab:mitigate). Harnesses: run_agentic.py, run_persist.py,
 run_localize.py (ablate/mask/excise/oracle).
+
+## POWERED-UP MITIGATION (n=60, LLM judge, 95% Wilson CI) — placement-dependent
+
+Key new finding: localized removal WORKS for appended injections, FAILS for
+mid-context. Bottleneck = localization under interleaving (oracle works at both).
+
+Qwen2.5-7B-Instruct, n=60:
+| condition | append hij [CI] / task | mid hij [CI] / task |
+|---|---|---|
+| no defense    | 0.87 [0.76,0.93] / 0.20 | 0.85 [0.74,0.92] / 0.20 |
+| localize-ablate | 0.65 [0.52,0.76] / 0.43 | 0.63 [0.51,0.74] / 0.38 |
+| localize-mask | 0.27 [0.17,0.39] / 0.75 | 0.70 [0.57,0.80] / 0.18 |
+| detect-excise | 0.27 [0.17,0.39] / 0.75 | 0.70 [0.57,0.80] / 0.20 |
+| oracle-excise | 0.12 [0.06,0.22] / 0.97 | 0.12 [0.06,0.22] / 0.97 |
+| clean         | -- / 0.92               | -- / 0.92 |
+gated: append 51/60, mid 48/60; mean localized: append 7.3, mid 13.0.
+
+Qwen2.5-14B-Instruct, mid, n=60 (confirms mid failure / oracle success):
+no-def 0.80 [0.68,0.88]/0.35; ablate 0.67/0.27; mask 0.65/0.17; excise 0.63/0.15;
+oracle 0.05 [0.02,0.14]/0.92; clean --/0.93. gated 49/60.
+
+Interpretation:
+- APPEND: mask/excise cut hijack 0.87->0.27 (CIs NON-overlapping) + task 0.20->0.75
+  (~oracle). A real, judge-validated mitigation for separable injections.
+- MID: mask/excise fail (0.85->0.70, CIs overlap); 14B same. Localization can't
+  carve the injection out of interleaved task content.
+- generation-position cancel: fails both (n=24: append 1.00/0.00, mid 0.96/0.04;
+  marker ASR 0.18 -> markers overstate).
+- Paper updated: title -> "...Localized Mitigation for Separable Injections";
+  Table 6 = placement split (append vs mid) w/ CIs; abstract/contribs/concl
+  reflect works-when-separable. 17 pages, clean compile.
