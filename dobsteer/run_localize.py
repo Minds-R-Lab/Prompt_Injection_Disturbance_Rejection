@@ -195,7 +195,7 @@ def main():
     fams = injection_families()
     eval_fams = [f for f in fams if f != "wild_deepset"]
     tasks = load_benign(n=args.n_eval, seed=7)
-    items = {"none": [], "ablate": [], "mask": [], "excise": [], "clean": []}
+    items = {"none": [], "ablate": [], "mask": [], "excise": [], "oracle": [], "clean": []}
     n_gated = 0
     print(f"  generating ({len(tasks)} tasks)...")
     for i, task in enumerate(tasks):
@@ -208,6 +208,8 @@ def main():
         items["ablate"].append({"task": task, "injected_intent": intent, "output": gen_ablate(doc)})
         items["mask"].append({"task": task, "injected_intent": intent, "output": gen_mask(doc)})
         items["excise"].append({"task": task, "injected_intent": intent, "output": gen_excise(doc)})
+        oracle_doc = fmt(place(task, "", args.placement))   # injection string removed exactly
+        items["oracle"].append({"task": task, "injected_intent": intent, "output": gen_plain(oracle_doc)})
         items["clean"].append({"task": task, "injected_intent": "(no injection present)",
                                "output": gen_mask(fmt(task))})
         print(f"    [{i+1}/{len(tasks)}] {fam}")
@@ -222,7 +224,8 @@ def main():
     print("\n=== detect-localize-mitigate (LLM-judged) ===")
     print(f"  {'condition':<18}{'ASR(hijacked)':>14}{'task_done':>12}")
     for c, lbl in (("none", "no defense"), ("ablate", "localize-ablate"),
-                   ("mask", "localize-mask"), ("excise", "detect-excise"), ("clean", "clean (no inj)")):
+                   ("mask", "localize-mask"), ("excise", "detect-excise"),
+                   ("oracle", "oracle-excise (UB)"), ("clean", "clean (no inj)")):
         asr = "--" if c == "clean" else f"{res[c]['asr']:.2f}"
         print(f"  {lbl:<18}{asr:>14}{res[c]['task_retention']:>12.2f}")
 
@@ -233,6 +236,7 @@ def main():
     print("localize-ablate & $" + f"{res['ablate']['asr']:.2f}" + "$ & $" + f"{res['ablate']['task_retention']:.2f}" + "$ \\\\")
     print("localize-mask & $" + f"{res['mask']['asr']:.2f}" + "$ & $" + f"{res['mask']['task_retention']:.2f}" + "$ \\\\")
     print("detect-excise & $" + f"{res['excise']['asr']:.2f}" + "$ & $" + f"{res['excise']['task_retention']:.2f}" + "$ \\\\")
+    print("oracle-excise (UB) & $" + f"{res['oracle']['asr']:.2f}" + "$ & $" + f"{res['oracle']['task_retention']:.2f}" + "$ \\\\")
     print("clean input & -- & $" + f"{res['clean']['task_retention']:.2f}" + "$ \\\\")
     print("\\bottomrule\\end{tabular}")
 
